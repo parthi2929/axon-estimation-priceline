@@ -1,0 +1,662 @@
+<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Priceline Tool</title>
+<script src="a7f4601e-e5db-4c8b-8964-6a7d7f54dda4" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="8212c759-d368-4424-8469-1dfd3b47ef17" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="f0684487-22fe-4cde-ac50-8908cbc4693d" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+<script src="7b33c29d-de29-44e0-9ad4-84fc75ce899d"></script>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: #f7f6f2;
+    font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+    padding: 40px 24px;
+  }
+  #root { width: 100%; max-width: 1100px; }
+</style>
+
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useRef, useEffect, useMemo } = React;
+
+// Default config preserves the original Axon Estimation Priceline data so the
+// page still works out of the box. "New Data" replaces it.
+const DEFAULT_CONFIG = {
+  title: "Axon Estimation",
+  subtitle: "Price Range Overview",
+  currency: {
+    symbol: "₹",
+    locale: "en-IN",
+    decimals: 2,
+    shortDivisor: 100000,
+    shortSuffix: "L",
+    shortDecimals: 1,
+  },
+  categories: [
+    { id: "raw",     label: "Raw costs",                  color: "#7a6a52", lineStyle: "solid"  },
+    { id: "thumb",   label: "Thumb refs",                 color: "#c0692a", lineStyle: "dashed" },
+    { id: "main",    label: "Current actuals",            color: "#2a7a4b", lineStyle: "solid"  },
+    { id: "variant", label: "Retained-rate scenarios",    color: "#4a5fa8", lineStyle: "solid"  },
+  ],
+  cases: [
+    { id: "-1",   label: "Case −1", value: 1991600,    category: "raw",     tooltip: "Partner material cost (m_v1)\nValue: 1,991,600" },
+    { id: "0",    label: "Case 0",             value: 2900208,    category: "raw",     tooltip: "Partner overall cost (t_v3)\nValue: 2,900,208" },
+    { id: "0.1",  label: "Case 0.1",           value: 4100208,    category: "raw",     tooltip: "Partner overall cost + Axon material cost (incl LC)\nt_v3 + m_a1 + m_a2 = 2,900,208 + 0 + 1,200,000 = 4,100,208" },
+    { id: "0.2",  label: "Case 0.2",           value: 4322708,    category: "raw",     tooltip: "Partner overall cost + Axon material (incl LC) + Axon Work\nt_v3 + m_a1 + m_a2 + l_a1 = 2,900,208 + 0 + 1,200,000 + 222,500 = 4,322,708" },
+    { id: "0.3",  label: "Case 0.3",           value: 4324708,    category: "raw",     tooltip: "Partner overall cost + Axon material (incl LC) + Axon vantage labor raw total\nt_v3 + m_a1 + m_a2 + L_van_raw = 2,900,208 + 0 + 1,200,000 + 224,500 = 4,324,708" },
+    { id: "1.T1", label: "Case 1.T1",          value: 5319333.33, category: "thumb",   tooltip: "Old-model thumb ref 1: (m_v1 + m_a2) / 0.60\n= (1,991,600 + 1,200,000) / 0.60 = 5,319,333.33\nvs current OCC: +656,382.29 above" },
+    { id: "2",    label: "Case 2",             value: 5883186.00, category: "main",    tooltip: "Sunil current estimation — vantage-model\nFinal = T + Nmtot = 5,883,186.00" },
+    { id: "1",    label: "Case 1",             value: 5975715.62, category: "main",    tooltip: "Sunil current estimation — old-model\nOCC = t_a4 = 5,975,715.62" },
+    { id: "1.1",  label: "Case 1.1",           value: 6255686.01, category: "variant", tooltip: "If Sunil had retained case-study old-model routing + Axon-side rates\nOCC = t_a4_cs = 6,255,686.01 (delta +279,970.39 vs Case 1)" },
+    { id: "1.T2", label: "Case 1.T2",          value: 6383200.00, category: "thumb",   tooltip: "Old-model thumb ref 2: (m_v1 + m_a2) / 0.50\n= (1,991,600 + 1,200,000) / 0.50 = 6,383,200.00\nvs current OCC: −407,484.38 below" },
+    { id: "2.1",  label: "Case 2.1",           value: 6420875.92, category: "variant", tooltip: "If Sunil had retained case-study Pmar = 35% on 2 key rows and Nm = 5%\nFinal = Final_cs = 6,420,875.92 (delta +537,689.92 vs Case 2)" },
+  ],
+};
+
+const STORAGE_KEY = "priceline-tool-config-v1";
+
+const fmt = (v, c) =>
+  c.symbol + Number(v).toLocaleString(c.locale || "en-US", { minimumFractionDigits: c.decimals, maximumFractionDigits: c.decimals });
+
+const fmtShort = (v, c) =>
+  c.symbol + (Number(v) / (c.shortDivisor || 1)).toFixed(c.shortDecimals) + (c.shortSuffix || "");
+
+const dashFor = (style) => style === "dashed" ? "4 3" : style === "dotted" ? "1 3" : "none";
+
+function computeAxisRange(cases) {
+  if (!cases.length) return { min: 0, max: 100, range: 100 };
+  const vals = cases.map(c => Number(c.value));
+  const lo = Math.min(...vals), hi = Math.max(...vals);
+  let span = hi - lo;
+  if (span === 0) {
+    const pad = Math.max(Math.abs(hi) * 0.1, 1);
+    return { min: lo - pad, max: hi + pad, range: 2 * pad };
+  }
+  const pad = span * 0.06;
+  const niceStep = Math.pow(10, Math.floor(Math.log10(span)));
+  const min = Math.floor((lo - pad) / niceStep) * niceStep;
+  const max = Math.ceil((hi + pad) / niceStep) * niceStep;
+  return { min, max, range: max - min };
+}
+
+function computeAxisTicks(min, max, range) {
+  const target = 10;
+  const raw = range / target;
+  if (!isFinite(raw) || raw <= 0) return [min, max];
+  const mag = Math.pow(10, Math.floor(Math.log10(raw)));
+  const norm = raw / mag;
+  const step = norm < 1.5 ? mag : norm < 3 ? mag * 2 : norm < 7 ? mag * 5 : mag * 10;
+  const start = Math.ceil(min / step) * step;
+  const ticks = [];
+  for (let v = start; v <= max + step * 0.001; v += step) ticks.push(Number(v.toFixed(10)));
+  return ticks;
+}
+
+function computeTickLayout(cases, toX) {
+  const minSpacing = 60;
+  const upBands = [80, 110, 135, 160, 185];
+  const downBands = [32, 48, 64, 80];
+  const sorted = [...cases].map(c => ({ id: c.id, x: toX(c.value) })).sort((a, b) => a.x - b.x);
+  const heights = {}, offsets = {};
+  const placedUp = [], placedDown = [];
+  for (const c of sorted) {
+    let h = upBands[0];
+    for (const b of upBands) {
+      if (!placedUp.some(p => Math.abs(p.x - c.x) < minSpacing && p.b === b)) { h = b; break; }
+    }
+    placedUp.push({ x: c.x, b: h });
+    heights[c.id] = h;
+    let o = downBands[0];
+    for (const b of downBands) {
+      if (!placedDown.some(p => Math.abs(p.x - c.x) < minSpacing && p.b === b)) { o = b; break; }
+    }
+    placedDown.push({ x: c.x, b: o });
+    offsets[c.id] = o;
+  }
+  return { heights, offsets };
+}
+
+function normalizeConfig(c) {
+  const cur = c.currency || {};
+  return {
+    title: c.title != null ? String(c.title) : DEFAULT_CONFIG.title,
+    subtitle: c.subtitle != null ? String(c.subtitle) : DEFAULT_CONFIG.subtitle,
+    currency: {
+      symbol: cur.symbol != null ? cur.symbol : DEFAULT_CONFIG.currency.symbol,
+      locale: cur.locale || DEFAULT_CONFIG.currency.locale,
+      decimals: Number.isFinite(+cur.decimals) ? +cur.decimals : DEFAULT_CONFIG.currency.decimals,
+      shortDivisor: Number.isFinite(+cur.shortDivisor) ? +cur.shortDivisor : DEFAULT_CONFIG.currency.shortDivisor,
+      shortSuffix: cur.shortSuffix != null ? cur.shortSuffix : DEFAULT_CONFIG.currency.shortSuffix,
+      shortDecimals: Number.isFinite(+cur.shortDecimals) ? +cur.shortDecimals : DEFAULT_CONFIG.currency.shortDecimals,
+    },
+    categories: Array.isArray(c.categories) && c.categories.length
+      ? c.categories.map(x => ({
+          id: String(x.id),
+          label: String(x.label != null ? x.label : x.id),
+          color: x.color || "#888",
+          lineStyle: x.lineStyle || "solid",
+        }))
+      : DEFAULT_CONFIG.categories,
+    cases: Array.isArray(c.cases)
+      ? c.cases.map(x => ({
+          id: String(x.id),
+          label: String(x.label != null ? x.label : x.id),
+          value: Number(x.value),
+          category: String(x.category || ""),
+          tooltip: x.tooltip != null ? String(x.tooltip) : "",
+        }))
+      : [],
+  };
+}
+
+function loadConfig() {
+  try {
+    const saved = localStorage.getItem(STORAGE_KEY);
+    if (saved) return normalizeConfig(JSON.parse(saved));
+  } catch {}
+  return DEFAULT_CONFIG;
+}
+
+// Chart -----------------------------------------------------------------------
+function Priceline({ config, onOpenForm }) {
+  const [tooltip, setTooltip] = useState(null);
+  const [rulerMode, setRulerMode] = useState(false);
+  const [rulerA, setRulerA] = useState(null);
+  const [rulerB, setRulerB] = useState(null);
+  const [exporting, setExporting] = useState(false);
+  const [copyFeedback, setCopyFeedback] = useState(false);
+  const containerRef = useRef(null);
+
+  useEffect(() => { setRulerA(null); setRulerB(null); setTooltip(null); }, [config]);
+
+  const catMap = useMemo(() => {
+    const m = {};
+    for (const c of config.categories) m[c.id] = c;
+    return m;
+  }, [config.categories]);
+
+  const colorOf = (catId) => catMap[catId] || { color: "#888", lineStyle: "solid", label: catId || "—" };
+
+  const copyPNG = async () => {
+    if (!containerRef.current) return;
+    setExporting(true);
+    await new Promise(r => setTimeout(r, 80));
+    try {
+      const canvas = await html2canvas(containerRef.current, {
+        backgroundColor: "#f7f6f2", scale: 2, useCORS: true, logging: false,
+        ignoreElements: (el) => el.hasAttribute && el.hasAttribute("data-no-export"),
+      });
+      canvas.toBlob(async (blob) => {
+        try {
+          await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
+          setCopyFeedback("Copied to clipboard!");
+        } catch { setCopyFeedback("Clipboard unavailable"); }
+        setExporting(false);
+        setTimeout(() => setCopyFeedback(false), 2500);
+      }, "image/png");
+    } catch { setExporting(false); }
+  };
+
+  const W = 1060, H = 480;
+  const AXIS_Y = 300;
+  const PAD_L = 60, PAD_R = 60;
+  const CHART_W = W - PAD_L - PAD_R;
+
+  const { min: minVal, max: maxVal, range } = useMemo(() => computeAxisRange(config.cases), [config.cases]);
+  const toX = (v) => PAD_L + ((v - minVal) / (range || 1)) * CHART_W;
+  const { heights, offsets } = useMemo(() => computeTickLayout(config.cases, toX), [config.cases, minVal, maxVal]);
+  const axisTicks = useMemo(() => computeAxisTicks(minVal, maxVal, range), [minVal, maxVal, range]);
+
+  const handleTickClick = (c) => {
+    if (!rulerMode) return;
+    if (!rulerA) { setRulerA(c); setRulerB(null); }
+    else if (!rulerB) { if (c.id === rulerA.id) return; setRulerB(c); }
+    else { setRulerA(c); setRulerB(null); }
+  };
+  const toggleRuler = () => { setRulerMode(m => !m); setRulerA(null); setRulerB(null); };
+
+  let rulerAnnotation = null;
+  if (rulerA && rulerB) {
+    const [lo, hi] = rulerA.value < rulerB.value ? [rulerA, rulerB] : [rulerB, rulerA];
+    const xLo = toX(lo.value), xHi = toX(hi.value);
+    const diff = hi.value - lo.value;
+    const pct = lo.value !== 0 ? ((hi.value - lo.value) / Math.abs(lo.value) * 100).toFixed(2) : "—";
+    rulerAnnotation = { xLo, xHi, lo, hi, diff, pct };
+  }
+  const RULER_Y = AXIS_Y + 52;
+
+  const btn = (active, accent) => ({
+    display: "flex", alignItems: "center", gap: 6,
+    padding: "7px 14px", borderRadius: 6, fontSize: 12, fontWeight: 500,
+    border: active ? `1.5px solid ${accent}` : "1.5px solid #ccc",
+    background: active ? "#f5f5f5" : "#fff",
+    color: active ? accent : "#555",
+    cursor: "pointer", transition: "all .15s",
+    letterSpacing: "0.01em",
+  });
+
+  return (
+    <div style={{ position: "relative" }} ref={containerRef}>
+      <div style={{ marginBottom: 28, display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 16, flexWrap: "wrap" }}>
+        <div>
+          <div style={{ fontSize: 11, letterSpacing: "0.12em", textTransform: "uppercase", color: "#999", marginBottom: 4 }}>{config.title}</div>
+          <div style={{ fontSize: 20, fontWeight: 600, color: "#1a1a1a", letterSpacing: "-0.02em" }}>{config.subtitle}</div>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap", justifyContent: "flex-end" }}>
+          <div style={{ display: "flex", gap: 14, fontSize: 12, flexWrap: "wrap" }}>
+            {config.categories.filter(cat => config.cases.some(c => c.category === cat.id)).map(cat => (
+              <div key={cat.id} style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                <div style={{ width: 3, height: 14, background: cat.color, borderRadius: 2 }} />
+                <span style={{ color: "#555" }}>{cat.label}</span>
+              </div>
+            ))}
+          </div>
+          <button onClick={copyPNG} style={{ ...btn(copyFeedback === "Copied to clipboard!", "#2a7a4b"), opacity: exporting ? 0.6 : 1 }} data-no-export>
+            <ExportIcon color={copyFeedback === "Copied to clipboard!" ? "#2a7a4b" : "#888"} />
+            {exporting ? "Copying…" : copyFeedback ? copyFeedback : "Copy PNG"}
+          </button>
+          <button onClick={toggleRuler} style={btn(rulerMode, "#4a5fa8")} data-no-export>
+            <RulerIcon color={rulerMode ? "#4a5fa8" : "#888"} />
+            {rulerMode ? (rulerA ? (rulerB ? "Reset ruler" : "Click 2nd point") : "Click 1st point") : "Measure"}
+          </button>
+          <button onClick={onOpenForm} style={btn(false, "#c0692a")} data-no-export>
+            <UploadIcon color="#888" />
+            Upload New Data
+          </button>
+        </div>
+      </div>
+
+      {config.cases.length === 0 ? (
+        <div style={{ padding: 60, textAlign: "center", border: "1.5px dashed #ccc", borderRadius: 10, color: "#888" }}>
+          No cases yet. Click <strong>Upload New Data</strong> in the top-right to add some.
+        </div>
+      ) : (
+        <svg width="100%" viewBox={`0 0 ${W} ${H}`} style={{ overflow: "visible", display: "block", cursor: rulerMode ? "crosshair" : "default" }}>
+          <line x1={PAD_L - 10} y1={AXIS_Y} x2={W - PAD_R + 10} y2={AXIS_Y} stroke="#1a1a1a" strokeWidth="1.5" />
+          {axisTicks.map((v, i) => {
+            const x = toX(v);
+            return <line key={i} x1={x} y1={AXIS_Y} x2={x} y2={AXIS_Y + 5} stroke="#ccc" strokeWidth="1" />;
+          })}
+          {axisTicks.map((v, i) => (
+            <text key={i} x={toX(v)} y={AXIS_Y + 18} textAnchor="middle" fontSize="10" fill="#aaa">{fmtShort(v, config.currency)}</text>
+          ))}
+
+          {rulerAnnotation && (() => {
+            const { xLo, xHi, lo, hi, diff, pct } = rulerAnnotation;
+            return (
+              <g>
+                <rect x={xLo} y={AXIS_Y + 22} width={xHi - xLo} height={28} fill="#4a5fa8" fillOpacity="0.08" rx="2" />
+                <line x1={xLo} y1={AXIS_Y + 22} x2={xLo} y2={AXIS_Y + 50} stroke="#4a5fa8" strokeWidth="1" strokeDasharray="3 2" />
+                <line x1={xHi} y1={AXIS_Y + 22} x2={xHi} y2={AXIS_Y + 50} stroke="#4a5fa8" strokeWidth="1" strokeDasharray="3 2" />
+                <line x1={xLo} y1={RULER_Y} x2={xHi} y2={RULER_Y} stroke="#4a5fa8" strokeWidth="1.5" markerStart="url(#arrowL)" markerEnd="url(#arrowR)" />
+                <rect x={(xLo + xHi)/2 - 92} y={RULER_Y + 8} width={184} height={38} rx="6" fill="#1e2d5a" fillOpacity="0.92" />
+                <text x={(xLo + xHi)/2} y={RULER_Y + 22} textAnchor="middle" fontSize="11" fontWeight="600" fill="#fff">{lo.label} → {hi.label}</text>
+                <text x={(xLo + xHi)/2} y={RULER_Y + 36} textAnchor="middle" fontSize="10.5" fill="#b8c6f0">+{fmt(diff, config.currency)}  ·  +{pct}% higher</text>
+              </g>
+            );
+          })()}
+
+          <defs>
+            <marker id="arrowR" markerWidth="6" markerHeight="6" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6" fill="none" stroke="#4a5fa8" strokeWidth="1.2" /></marker>
+            <marker id="arrowL" markerWidth="6" markerHeight="6" refX="0" refY="3" orient="auto-start-reverse"><path d="M0,0 L6,3 L0,6" fill="none" stroke="#4a5fa8" strokeWidth="1.2" /></marker>
+          </defs>
+
+          {config.cases.map(c => {
+            const x = toX(c.value);
+            const cat = colorOf(c.category);
+            const tickH = heights[c.id] || 100;
+            const isA = rulerA && rulerA.id === c.id;
+            const isB = rulerB && rulerB.id === c.id;
+            const hi = isA || isB;
+            return (
+              <g key={c.id} style={{ cursor: rulerMode ? "pointer" : "default" }}
+                 onClick={() => handleTickClick(c)}
+                 onMouseEnter={() => { if (rulerMode) return; setTooltip({ id: c.id, x, text: c.tooltip || "", label: c.label, value: c.value }); }}
+                 onMouseLeave={() => setTooltip(null)}>
+                <line x1={x} y1={AXIS_Y - tickH} x2={x} y2={AXIS_Y} stroke={cat.color} strokeWidth={hi ? 3 : 1.8} strokeDasharray={dashFor(cat.lineStyle)} opacity={hi ? 1 : 0.85} />
+                <circle cx={x} cy={AXIS_Y} r={hi ? 5 : 3.5} fill={hi ? cat.color : "#f7f6f2"} stroke={cat.color} strokeWidth={hi ? 0 : 1.8} />
+                {hi && <circle cx={x} cy={AXIS_Y} r={9} fill="none" stroke={cat.color} strokeWidth="1.5" strokeDasharray="3 2" />}
+                <text x={x} y={AXIS_Y - tickH - 8} textAnchor="middle" fontSize="11.5" fontWeight="600" fill={cat.color} fontFamily="'Helvetica Neue', Helvetica, monospace">{fmtShort(c.value, config.currency)}</text>
+                <text x={x} y={AXIS_Y + (offsets[c.id] || 32)} textAnchor="middle" fontSize="11" fontWeight="500" fill={cat.color}>{c.label}</text>
+              </g>
+            );
+          })}
+        </svg>
+      )}
+
+      {tooltip && !rulerMode && (() => {
+        const c = config.cases.find(x => x.id === tooltip.id);
+        const cat = colorOf(c && c.category);
+        const lines = (tooltip.text || "").split("\n");
+        return (
+          <div style={{
+            position: "absolute", left: `calc(${(tooltip.x / W) * 100}% - 0px)`, top: 60, transform: "translateX(-50%)",
+            background: "#1a1a1a", color: "#f0f0f0", borderRadius: 8, padding: "10px 14px", fontSize: 12, lineHeight: 1.6,
+            pointerEvents: "none", zIndex: 10, minWidth: 240, maxWidth: 340,
+            boxShadow: "0 4px 20px rgba(0,0,0,0.25)", borderLeft: `3px solid ${cat.color}`,
+          }}>
+            <div style={{ fontWeight: 600, color: cat.color, marginBottom: 4 }}>{tooltip.label} — {fmt(tooltip.value, config.currency)}</div>
+            {lines.filter(l => l.length).map((l, i) => <div key={i} style={{ color: "#ccc" }}>{l}</div>)}
+          </div>
+        );
+      })()}
+
+      {rulerMode && !rulerA && <div style={{ marginTop: 8, fontSize: 12, color: "#4a5fa8", textAlign: "center" }}>Click any case marker to set the first measurement point</div>}
+      {rulerMode && rulerA && !rulerB && <div style={{ marginTop: 8, fontSize: 12, color: "#4a5fa8", textAlign: "center" }}><strong>{rulerA.label}</strong> selected — click a second case marker</div>}
+    </div>
+  );
+}
+
+// Form modal ------------------------------------------------------------------
+function DataForm({ config, onSave, onClose }) {
+  const [draft, setDraft] = useState(() => JSON.parse(JSON.stringify(config)));
+  const [tab, setTab] = useState("cases");
+  const [error, setError] = useState(null);
+  const [jsonText, setJsonText] = useState(() => JSON.stringify(config, null, 2));
+  const fileRef = useRef(null);
+
+  useEffect(() => {
+    if (tab === "json") setJsonText(JSON.stringify(draft, null, 2));
+  }, [tab]);
+
+  const updateCase = (i, patch) => {
+    const cases = draft.cases.slice();
+    cases[i] = { ...cases[i], ...patch };
+    setDraft({ ...draft, cases });
+  };
+  const addCase = () => {
+    const id = "c" + (draft.cases.length + 1);
+    setDraft({ ...draft, cases: [...draft.cases, { id, label: "Case " + id, value: 0, category: draft.categories[0]?.id || "", tooltip: "" }] });
+  };
+  const removeCase = (i) => setDraft({ ...draft, cases: draft.cases.filter((_, j) => j !== i) });
+
+  const updateCat = (i, patch) => {
+    const categories = draft.categories.slice();
+    categories[i] = { ...categories[i], ...patch };
+    setDraft({ ...draft, categories });
+  };
+  const addCat = () => {
+    const id = "cat" + (draft.categories.length + 1);
+    setDraft({ ...draft, categories: [...draft.categories, { id, label: "New category", color: "#888888", lineStyle: "solid" }] });
+  };
+  const removeCat = (i) => setDraft({ ...draft, categories: draft.categories.filter((_, j) => j !== i) });
+
+  const onUpload = (e) => {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const parsed = JSON.parse(reader.result);
+        const next = normalizeConfig(parsed);
+        setDraft(next);
+        setJsonText(JSON.stringify(next, null, 2));
+        setError(null);
+      } catch (err) {
+        setError("Invalid JSON: " + err.message);
+      }
+    };
+    reader.readAsText(file);
+    e.target.value = "";
+  };
+
+  const onDownload = () => {
+    const blob = new Blob([JSON.stringify(draft, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = ((draft.title || "priceline").replace(/\s+/g, "-").toLowerCase()) + "-data.json";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
+  const onResetDefaults = () => {
+    if (window.confirm("Reset all values to the original defaults? Unsaved changes will be lost.")) {
+      const next = JSON.parse(JSON.stringify(DEFAULT_CONFIG));
+      setDraft(next);
+      setJsonText(JSON.stringify(next, null, 2));
+    }
+  };
+  const onClearAll = () => {
+    if (window.confirm("Clear all cases? Categories and headings stay.")) {
+      const next = { ...draft, cases: [] };
+      setDraft(next);
+      setJsonText(JSON.stringify(next, null, 2));
+    }
+  };
+
+  const onApply = () => {
+    if (!draft.categories.length) { setError("Add at least one category."); return; }
+    const ids = new Set();
+    for (const c of draft.cases) {
+      if (!c.id) { setError("Every case needs a non-empty id."); return; }
+      if (ids.has(c.id)) { setError("Duplicate case id: " + c.id); return; }
+      ids.add(c.id);
+      if (!Number.isFinite(Number(c.value))) { setError("Case " + (c.label || c.id) + " has a non-numeric value."); return; }
+    }
+    const normalized = { ...draft, cases: draft.cases.map(c => ({ ...c, value: Number(c.value) })) };
+    onSave(normalized);
+  };
+
+  const overlay = { position: "fixed", inset: 0, background: "rgba(0,0,0,0.45)", zIndex: 100, display: "flex", alignItems: "flex-start", justifyContent: "center", padding: "40px 20px", overflowY: "auto" };
+  const modal = { background: "#fff", borderRadius: 10, width: "100%", maxWidth: 920, boxShadow: "0 20px 60px rgba(0,0,0,0.3)", display: "flex", flexDirection: "column", maxHeight: "calc(100vh - 80px)" };
+  const tabBtn = (active) => ({ padding: "10px 16px", border: "none", background: "transparent", borderBottom: active ? "2px solid #1a1a1a" : "2px solid transparent", color: active ? "#1a1a1a" : "#888", fontWeight: active ? 600 : 500, fontSize: 13, cursor: "pointer", letterSpacing: "0.01em" });
+  const input = { padding: "6px 8px", border: "1px solid #ddd", borderRadius: 4, fontSize: 12, fontFamily: "inherit", width: "100%" };
+  const label = { fontSize: 11, color: "#777", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 4, display: "block" };
+  const sectionTitle = { fontSize: 11, color: "#777", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 10, fontWeight: 600 };
+
+  return (
+    <div style={overlay} onClick={onClose}>
+      <div style={modal} onClick={e => e.stopPropagation()}>
+        <div style={{ padding: "16px 20px", borderBottom: "1px solid #eee", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+          <div>
+            <div style={{ fontSize: 16, fontWeight: 600, color: "#1a1a1a" }}>Edit chart data</div>
+            <div style={{ fontSize: 12, color: "#888", marginTop: 2 }}>Define cases, categories, and presentation options. Saved to your browser.</div>
+          </div>
+          <button onClick={onClose} style={{ border: "none", background: "transparent", fontSize: 24, color: "#999", cursor: "pointer", lineHeight: 1, padding: "0 6px" }}>×</button>
+        </div>
+
+        <div style={{ display: "flex", borderBottom: "1px solid #eee", padding: "0 20px" }}>
+          <button onClick={() => setTab("cases")} style={tabBtn(tab === "cases")}>Cases ({draft.cases.length})</button>
+          <button onClick={() => setTab("categories")} style={tabBtn(tab === "categories")}>Categories ({draft.categories.length})</button>
+          <button onClick={() => setTab("general")} style={tabBtn(tab === "general")}>General</button>
+          <button onClick={() => setTab("json")} style={tabBtn(tab === "json")}>JSON</button>
+        </div>
+
+        <div style={{ padding: "20px", overflowY: "auto", flex: 1 }}>
+          {tab === "cases" && (
+            <div>
+              <div style={{ display: "grid", gridTemplateColumns: "90px 1.2fr 120px 120px 1.5fr 28px", gap: 8, marginBottom: 8, fontSize: 11, color: "#777", textTransform: "uppercase", letterSpacing: "0.06em" }}>
+                <div>ID</div><div>Label</div><div>Value</div><div>Category</div><div>Tooltip / description</div><div></div>
+              </div>
+              {draft.cases.map((c, i) => (
+                <div key={i} style={{ display: "grid", gridTemplateColumns: "90px 1.2fr 120px 120px 1.5fr 28px", gap: 8, marginBottom: 6, alignItems: "start" }}>
+                  <input style={input} value={c.id} onChange={e => updateCase(i, { id: e.target.value })} />
+                  <input style={input} value={c.label} onChange={e => updateCase(i, { label: e.target.value })} />
+                  <input style={input} type="number" step="any" value={c.value} onChange={e => updateCase(i, { value: e.target.value })} />
+                  <select style={input} value={c.category} onChange={e => updateCase(i, { category: e.target.value })}>
+                    <option value="">(none)</option>
+                    {draft.categories.map(cat => <option key={cat.id} value={cat.id}>{cat.label}</option>)}
+                  </select>
+                  <textarea style={{ ...input, resize: "vertical", minHeight: 28 }} rows={1} value={c.tooltip || ""} onChange={e => updateCase(i, { tooltip: e.target.value })} placeholder="Multi-line description (Enter for new line)" />
+                  <button onClick={() => removeCase(i)} style={{ border: "1px solid #eee", background: "#fff", borderRadius: 4, color: "#c33", cursor: "pointer", padding: "4px 0", fontSize: 14 }}>×</button>
+                </div>
+              ))}
+              <button onClick={addCase} style={{ marginTop: 10, padding: "6px 12px", border: "1px dashed #aaa", background: "transparent", borderRadius: 6, color: "#555", cursor: "pointer", fontSize: 12 }}>+ Add case</button>
+            </div>
+          )}
+
+          {tab === "categories" && (
+            <div>
+              <div style={{ display: "grid", gridTemplateColumns: "120px 1fr 140px 120px 28px", gap: 8, marginBottom: 8, fontSize: 11, color: "#777", textTransform: "uppercase", letterSpacing: "0.06em" }}>
+                <div>ID</div><div>Label</div><div>Color</div><div>Line style</div><div></div>
+              </div>
+              {draft.categories.map((c, i) => (
+                <div key={i} style={{ display: "grid", gridTemplateColumns: "120px 1fr 140px 120px 28px", gap: 8, marginBottom: 6, alignItems: "center" }}>
+                  <input style={input} value={c.id} onChange={e => updateCat(i, { id: e.target.value })} />
+                  <input style={input} value={c.label} onChange={e => updateCat(i, { label: e.target.value })} />
+                  <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
+                    <input type="color" value={c.color} onChange={e => updateCat(i, { color: e.target.value })} style={{ width: 36, height: 28, border: "1px solid #ddd", borderRadius: 4, padding: 0, cursor: "pointer" }} />
+                    <input style={{ ...input, fontFamily: "ui-monospace, monospace" }} value={c.color} onChange={e => updateCat(i, { color: e.target.value })} />
+                  </div>
+                  <select style={input} value={c.lineStyle} onChange={e => updateCat(i, { lineStyle: e.target.value })}>
+                    <option value="solid">Solid</option>
+                    <option value="dashed">Dashed</option>
+                    <option value="dotted">Dotted</option>
+                  </select>
+                  <button onClick={() => removeCat(i)} style={{ border: "1px solid #eee", background: "#fff", borderRadius: 4, color: "#c33", cursor: "pointer", padding: "4px 0", fontSize: 14 }}>×</button>
+                </div>
+              ))}
+              <button onClick={addCat} style={{ marginTop: 10, padding: "6px 12px", border: "1px dashed #aaa", background: "transparent", borderRadius: 6, color: "#555", cursor: "pointer", fontSize: 12 }}>+ Add category</button>
+            </div>
+          )}
+
+          {tab === "general" && (
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 28 }}>
+              <div>
+                <div style={sectionTitle}>Headings</div>
+                <label style={label}>Eyebrow / heading</label>
+                <input style={{ ...input, marginBottom: 12 }} value={draft.title} onChange={e => setDraft({ ...draft, title: e.target.value })} />
+                <label style={label}>Subheading</label>
+                <input style={input} value={draft.subtitle} onChange={e => setDraft({ ...draft, subtitle: e.target.value })} />
+              </div>
+              <div>
+                <div style={sectionTitle}>Currency format</div>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                  <div>
+                    <label style={label}>Symbol</label>
+                    <input style={input} value={draft.currency.symbol} onChange={e => setDraft({ ...draft, currency: { ...draft.currency, symbol: e.target.value } })} />
+                  </div>
+                  <div>
+                    <label style={label}>Locale</label>
+                    <input style={input} value={draft.currency.locale} onChange={e => setDraft({ ...draft, currency: { ...draft.currency, locale: e.target.value } })} placeholder="e.g. en-IN, en-US" />
+                  </div>
+                  <div>
+                    <label style={label}>Decimals</label>
+                    <input type="number" style={input} value={draft.currency.decimals} onChange={e => setDraft({ ...draft, currency: { ...draft.currency, decimals: Number(e.target.value) } })} />
+                  </div>
+                  <div>
+                    <label style={label}>Short divisor</label>
+                    <input type="number" style={input} value={draft.currency.shortDivisor} onChange={e => setDraft({ ...draft, currency: { ...draft.currency, shortDivisor: Number(e.target.value) } })} placeholder="100000=L · 1000000=M" />
+                  </div>
+                  <div>
+                    <label style={label}>Short suffix</label>
+                    <input style={input} value={draft.currency.shortSuffix} onChange={e => setDraft({ ...draft, currency: { ...draft.currency, shortSuffix: e.target.value } })} placeholder="L, M, K, …" />
+                  </div>
+                  <div>
+                    <label style={label}>Short decimals</label>
+                    <input type="number" style={input} value={draft.currency.shortDecimals} onChange={e => setDraft({ ...draft, currency: { ...draft.currency, shortDecimals: Number(e.target.value) } })} />
+                  </div>
+                </div>
+                <div style={{ fontSize: 11, color: "#888", marginTop: 12, padding: 10, background: "#f5f5f5", borderRadius: 6 }}>
+                  Preview: full <strong>{fmt(1234567.89, draft.currency)}</strong> · short <strong>{fmtShort(1234567.89, draft.currency)}</strong>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {tab === "json" && (
+            <div>
+              <div style={{ display: "flex", gap: 10, marginBottom: 10, flexWrap: "wrap" }}>
+                <button onClick={() => fileRef.current && fileRef.current.click()} style={{ padding: "6px 12px", border: "1px solid #ccc", background: "#fff", borderRadius: 6, cursor: "pointer", fontSize: 12 }}>Upload JSON file</button>
+                <button onClick={onDownload} style={{ padding: "6px 12px", border: "1px solid #ccc", background: "#fff", borderRadius: 6, cursor: "pointer", fontSize: 12 }}>Download current JSON</button>
+                <input ref={fileRef} type="file" accept=".json,application/json" style={{ display: "none" }} onChange={onUpload} />
+              </div>
+              <textarea
+                style={{ width: "100%", minHeight: 340, fontFamily: "ui-monospace, monospace", fontSize: 12, padding: 12, border: "1px solid #ddd", borderRadius: 6, lineHeight: 1.5 }}
+                value={jsonText}
+                onChange={e => {
+                  setJsonText(e.target.value);
+                  try {
+                    const parsed = JSON.parse(e.target.value);
+                    setDraft(normalizeConfig(parsed));
+                    setError(null);
+                  } catch (err) {
+                    setError("JSON parse error: " + err.message);
+                  }
+                }}
+              />
+              <div style={{ fontSize: 11, color: "#888", marginTop: 8, lineHeight: 1.6 }}>
+                Schema: <code>{"{ title, subtitle, currency: { symbol, locale, decimals, shortDivisor, shortSuffix, shortDecimals }, categories: [{ id, label, color, lineStyle }], cases: [{ id, label, value, category, tooltip }] }"}</code>
+              </div>
+            </div>
+          )}
+        </div>
+
+        {error && <div style={{ padding: "8px 20px", background: "#fff0f0", color: "#c33", fontSize: 12, borderTop: "1px solid #f5d0d0" }}>{error}</div>}
+
+        <div style={{ padding: "12px 20px", borderTop: "1px solid #eee", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button onClick={onResetDefaults} style={{ padding: "8px 14px", border: "1px solid #ddd", background: "#fff", borderRadius: 6, color: "#555", cursor: "pointer", fontSize: 12 }}>Reset to defaults</button>
+            <button onClick={onClearAll} style={{ padding: "8px 14px", border: "1px solid #ddd", background: "#fff", borderRadius: 6, color: "#555", cursor: "pointer", fontSize: 12 }}>Clear cases</button>
+          </div>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button onClick={onClose} style={{ padding: "8px 14px", border: "1px solid #ddd", background: "#fff", borderRadius: 6, color: "#555", cursor: "pointer", fontSize: 12 }}>Cancel</button>
+            <button onClick={onApply} style={{ padding: "8px 18px", border: "1px solid #2a7a4b", background: "#2a7a4b", borderRadius: 6, color: "#fff", cursor: "pointer", fontSize: 12, fontWeight: 600 }}>Apply</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function App() {
+  const [config, setConfig] = useState(loadConfig);
+  const [showForm, setShowForm] = useState(false);
+
+  useEffect(() => {
+    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(config)); } catch {}
+  }, [config]);
+
+  return (
+    <>
+      <Priceline config={config} onOpenForm={() => setShowForm(true)} />
+      {showForm && <DataForm config={config} onClose={() => setShowForm(false)} onSave={(c) => { setConfig(c); setShowForm(false); }} />}
+    </>
+  );
+}
+
+function ExportIcon({ color = "#888" }) {
+  return (
+    <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+      <path d="M7 1v8M4 6l3 3 3-3" stroke={color} strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round"/>
+      <path d="M2 10v2h10v-2" stroke={color} strokeWidth="1.3" strokeLinecap="round"/>
+    </svg>
+  );
+}
+
+function RulerIcon({ color = "#888" }) {
+  return (
+    <svg width="15" height="15" viewBox="0 0 15 15" fill="none">
+      <rect x="1" y="4.5" width="13" height="6" rx="1.5" stroke={color} strokeWidth="1.2" />
+      <line x1="4" y1="4.5" x2="4" y2="7" stroke={color} strokeWidth="1.2" />
+      <line x1="7.5" y1="4.5" x2="7.5" y2="8.5" stroke={color} strokeWidth="1.2" />
+      <line x1="11" y1="4.5" x2="11" y2="7" stroke={color} strokeWidth="1.2" />
+    </svg>
+  );
+}
+
+function UploadIcon({ color = "#888" }) {
+  return (
+    <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+      <path d="M7 9V1M4 4l3-3 3 3" stroke={color} strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round"/>
+      <path d="M2 10v2h10v-2" stroke={color} strokeWidth="1.3" strokeLinecap="round"/>
+    </svg>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+
+
+</body></html>
