@@ -71,6 +71,18 @@ const fmtShort = (v, c) =>
 
 const dashFor = (style) => style === "dashed" ? "4 3" : style === "dotted" ? "1 3" : "none";
 
+// Line height (svg px) for a wrapped label or tooltip line.
+const LABEL_LINE_H = 13;
+// Smallest gap between the axis and a label baseline.
+const LABEL_MIN_OFFSET = 20;
+
+// Labels and tooltips accept "\n" as a line break. JSON gives a real newline
+// character; a single-line form input gives the two characters \ and n. Both
+// produce the same result.
+const toLines = (s) => String(s == null ? "" : s).replace(/\\n/g, "\n").split("\n");
+
+const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+
 function computeAxisRange(cases) {
   if (!cases.length) return { min: 0, max: 100, range: 100 };
   const vals = cases.map(c => Number(c.value));
@@ -103,7 +115,11 @@ function computeAxisTicks(min, max, range) {
 function computeTickLayout(cases, toX) {
   const minSpacing = 60;
   const upBands = [80, 110, 135, 160, 185];
-  const downBands = [32, 48, 64, 80];
+  // Multi-line labels need taller bands so a two-line label in band 0 cannot
+  // run into a label in band 1.
+  const maxLines = Math.max(1, ...cases.map(c => toLines(c.label).length));
+  const downStep = 18 + (maxLines - 1) * LABEL_LINE_H;
+  const downBands = [0, 1, 2, 3].map(i => 32 + i * downStep);
   const sorted = [...cases].map(c => ({ id: c.id, x: toX(c.value) })).sort((a, b) => a.x - b.x);
   const heights = {}, offsets = {};
   const placedUp = [], placedDown = [];
@@ -152,6 +168,9 @@ function normalizeConfig(c) {
           value: Number(x.value),
           category: String(x.category || ""),
           tooltip: x.tooltip != null ? String(x.tooltip) : "",
+          // px below the axis for the label baseline; null = automatic layout
+          labelOffset: (x.labelOffset == null || x.labelOffset === "" || !Number.isFinite(+x.labelOffset))
+            ? null : +x.labelOffset,
         }))
       : [],
   };
@@ -192,7 +211,7 @@ function loadConfig() {
 }
 
 // Chart -----------------------------------------------------------------------
-function Priceline({ config, onOpenForm }) {
+function Priceline({ config, onOpenForm, onConfigChange }) {
   const [tooltip, setTooltip] = useState(null);
   const [rulerMode, setRulerMode] = useState(false);
   const [rulerA, setRulerA] = useState(null);
@@ -200,10 +219,18 @@ function Priceline({ config, onOpenForm }) {
   const [exporting, setExporting] = useState(false);
   const [copyFeedback, setCopyFeedback] = useState(false);
   const [copyMenuOpen, setCopyMenuOpen] = useState(false);
+  const [drag, setDrag] = useState(null);
   const containerRef = useRef(null);
   const copyMenuRef = useRef(null);
+  const svgRef = useRef(null);
 
-  useEffect(() => { setRulerA(null); setRulerB(null); setTooltip(null); }, [config]);
+  // Dragging a label rewrites config, so key the reset off the data that a
+  // ruler measurement depends on instead of the whole config object.
+  const casesSig = useMemo(
+    () => config.cases.map(c => c.id + ":" + c.value).join("|"),
+    [config.cases]
+  );
+  useEffect(() => { setRulerA(null); setRulerB(null); setTooltip(null); }, [casesSig]);
 
   useEffect(() => {
     if (!copyMenuOpen) return;
@@ -270,15 +297,59 @@ function Priceline({ config, onOpenForm }) {
     } catch { flashFeedback("Clipboard unavailable"); }
   };
 
-  const W = 1060, H = 480;
+  const W = 1060;
   const AXIS_Y = 300;
   const PAD_L = 60, PAD_R = 60;
   const CHART_W = W - PAD_L - PAD_R;
+  // A label can be pulled down by at most the height of the plot area.
+  const LABEL_MAX_OFFSET = AXIS_Y;
 
   const { min: minVal, max: maxVal, range } = useMemo(() => computeAxisRange(config.cases), [config.cases]);
   const toX = (v) => PAD_L + ((v - minVal) / (range || 1)) * CHART_W;
   const { heights, offsets } = useMemo(() => computeTickLayout(config.cases, toX), [config.cases, minVal, maxVal]);
   const axisTicks = useMemo(() => computeAxisTicks(minVal, maxVal, range), [minVal, maxVal, range]);
+
+  const autoOffsetOf = (c) => offsets[c.id] || 32;
+  const offsetOf = (c) => {
+    if (drag && drag.id === c.id) return drag.offset;
+    return Number.isFinite(c.labelOffset) ? c.labelOffset : autoOffsetOf(c);
+  };
+
+  // The viewBox grows downward so a dragged label stays inside the picture and
+  // is included in the PNG export.
+  const labelBottom = Math.max(
+    32,
+    ...config.cases.map(c => offsetOf(c) + (toLines(c.label).length - 1) * LABEL_LINE_H)
+  );
+  const H = Math.max(480, AXIS_Y + labelBottom + 40);
+
+  const setOffset = (id, off) => {
+    if (!onConfigChange) return;
+    onConfigChange({ ...config, cases: config.cases.map(c => c.id === id ? { ...c, labelOffset: off } : c) });
+  };
+
+  const startDrag = (e, c) => {
+    if (rulerMode || !onConfigChange) return;
+    e.stopPropagation();
+    e.preventDefault();
+    const rect = svgRef.current ? svgRef.current.getBoundingClientRect() : null;
+    const scale = rect && rect.width ? W / rect.width : 1;
+    setTooltip(null);
+    setDrag({ id: c.id, startY: e.clientY, startOffset: offsetOf(c), offset: offsetOf(c), scale, moved: false });
+    try { e.currentTarget.setPointerCapture(e.pointerId); } catch {}
+  };
+  const moveDrag = (e) => {
+    if (!drag) return;
+    const next = clamp(drag.startOffset + (e.clientY - drag.startY) * drag.scale, LABEL_MIN_OFFSET, LABEL_MAX_OFFSET);
+    setDrag(d => d && ({ ...d, offset: next, moved: d.moved || Math.abs(next - d.startOffset) > 1 }));
+  };
+  const endDrag = () => {
+    if (!drag) return;
+    if (drag.moved) setOffset(drag.id, Math.round(drag.offset));
+    setDrag(null);
+  };
+  const resetLabel = (c) => { if (Number.isFinite(c.labelOffset)) setOffset(c.id, null); };
+  const anyLabelMoved = config.cases.some(c => Number.isFinite(c.labelOffset));
 
   const handleTickClick = (c) => {
     if (!rulerMode) return;
@@ -370,7 +441,7 @@ function Priceline({ config, onOpenForm }) {
           No cases yet. Click <strong>Upload New Data</strong> in the top-right to add some.
         </div>
       ) : (
-        <svg width="100%" viewBox={`0 0 ${W} ${H}`} style={{ overflow: "visible", display: "block", cursor: rulerMode ? "crosshair" : "default" }}>
+        <svg ref={svgRef} width="100%" viewBox={`0 0 ${W} ${H}`} style={{ overflow: "visible", display: "block", cursor: rulerMode ? "crosshair" : "default" }}>
           <line x1={PAD_L - 10} y1={AXIS_Y} x2={W - PAD_R + 10} y2={AXIS_Y} stroke="#1a1a1a" strokeWidth="1.5" />
           {axisTicks.map((v, i) => {
             const x = toX(v);
@@ -389,7 +460,7 @@ function Priceline({ config, onOpenForm }) {
                 <line x1={xHi} y1={AXIS_Y + 22} x2={xHi} y2={AXIS_Y + 50} stroke="#4a5fa8" strokeWidth="1" strokeDasharray="3 2" />
                 <line x1={xLo} y1={RULER_Y} x2={xHi} y2={RULER_Y} stroke="#4a5fa8" strokeWidth="1.5" markerStart="url(#arrowL)" markerEnd="url(#arrowR)" />
                 <rect x={(xLo + xHi)/2 - 92} y={RULER_Y + 8} width={184} height={38} rx="6" fill="#1e2d5a" fillOpacity="0.92" />
-                <text x={(xLo + xHi)/2} y={RULER_Y + 22} textAnchor="middle" fontSize="11" fontWeight="600" fill="#fff">{lo.label} → {hi.label}</text>
+                <text x={(xLo + xHi)/2} y={RULER_Y + 22} textAnchor="middle" fontSize="11" fontWeight="600" fill="#fff">{toLines(lo.label).join(" ")} → {toLines(hi.label).join(" ")}</text>
                 <text x={(xLo + xHi)/2} y={RULER_Y + 36} textAnchor="middle" fontSize="10.5" fill="#b8c6f0">+{fmt(diff, config.currency)}  ·  +{pct}% higher</text>
               </g>
             );
@@ -407,16 +478,35 @@ function Priceline({ config, onOpenForm }) {
             const isA = rulerA && rulerA.id === c.id;
             const isB = rulerB && rulerB.id === c.id;
             const hi = isA || isB;
+            const labelOff = offsetOf(c);
+            const labelLines = toLines(c.label);
+            const isDragging = drag && drag.id === c.id;
+            // Leader line so a pulled-down label still reads against its tick.
+            const leader = labelOff > 44;
             return (
               <g key={c.id} style={{ cursor: rulerMode ? "pointer" : "default" }}
                  onClick={() => handleTickClick(c)}
-                 onMouseEnter={() => { if (rulerMode) return; setTooltip({ id: c.id, x, text: c.tooltip || "", label: c.label, value: c.value }); }}
+                 onMouseEnter={() => { if (rulerMode || drag) return; setTooltip({ id: c.id, x, text: c.tooltip || "", label: c.label, value: c.value }); }}
                  onMouseLeave={() => setTooltip(null)}>
                 <line x1={x} y1={AXIS_Y - tickH} x2={x} y2={AXIS_Y} stroke={cat.color} strokeWidth={hi ? 3 : 1.8} strokeDasharray={dashFor(cat.lineStyle)} opacity={hi ? 1 : 0.85} />
                 <circle cx={x} cy={AXIS_Y} r={hi ? 5 : 3.5} fill={hi ? cat.color : "#f7f6f2"} stroke={cat.color} strokeWidth={hi ? 0 : 1.8} />
                 {hi && <circle cx={x} cy={AXIS_Y} r={9} fill="none" stroke={cat.color} strokeWidth="1.5" strokeDasharray="3 2" />}
                 <text x={x} y={AXIS_Y - tickH - 8} textAnchor="middle" fontSize="11.5" fontWeight="600" fill={cat.color} fontFamily="'Helvetica Neue', Helvetica, monospace">{fmtShort(c.value, config.currency)}</text>
-                <text x={x} y={AXIS_Y + (offsets[c.id] || 32)} textAnchor="middle" fontSize="11" fontWeight="500" fill={cat.color}>{c.label}</text>
+                {leader && (
+                  <line x1={x} y1={AXIS_Y + 10} x2={x} y2={AXIS_Y + labelOff - 11} stroke={cat.color} strokeWidth="1" strokeDasharray="2 3" opacity={isDragging ? 0.7 : 0.35} />
+                )}
+                <text x={x} y={AXIS_Y + labelOff} textAnchor="middle" fontSize="11" fontWeight="500" fill={cat.color}
+                      opacity={isDragging ? 0.75 : 1}
+                      style={{ cursor: rulerMode ? "pointer" : "ns-resize", userSelect: "none", WebkitUserSelect: "none", touchAction: "none" }}
+                      onPointerDown={(e) => startDrag(e, c)}
+                      onPointerMove={moveDrag}
+                      onPointerUp={endDrag}
+                      onPointerCancel={endDrag}
+                      onDoubleClick={() => resetLabel(c)}>
+                  {labelLines.map((ln, li) => (
+                    <tspan key={li} x={x} dy={li === 0 ? 0 : LABEL_LINE_H}>{ln}</tspan>
+                  ))}
+                </text>
               </g>
             );
           })}
@@ -426,7 +516,7 @@ function Priceline({ config, onOpenForm }) {
       {tooltip && !rulerMode && (() => {
         const c = config.cases.find(x => x.id === tooltip.id);
         const cat = colorOf(c && c.category);
-        const lines = (tooltip.text || "").split("\n");
+        const lines = toLines(tooltip.text);
         return (
           <div style={{
             position: "absolute", left: `calc(${(tooltip.x / W) * 100}% - 0px)`, top: 60, transform: "translateX(-50%)",
@@ -434,14 +524,25 @@ function Priceline({ config, onOpenForm }) {
             pointerEvents: "none", zIndex: 10, minWidth: 240, maxWidth: 340,
             boxShadow: "0 4px 20px rgba(0,0,0,0.25)", borderLeft: `3px solid ${cat.color}`,
           }}>
-            <div style={{ fontWeight: 600, color: cat.color, marginBottom: 4 }}>{tooltip.label} — {fmt(tooltip.value, config.currency)}</div>
+            <div style={{ fontWeight: 600, color: cat.color, marginBottom: 4 }}>{toLines(tooltip.label).join(" ")} — {fmt(tooltip.value, config.currency)}</div>
             {lines.filter(l => l.length).map((l, i) => <div key={i} style={{ color: "#ccc" }}>{l}</div>)}
           </div>
         );
       })()}
 
       {rulerMode && !rulerA && <div style={{ marginTop: 8, fontSize: 12, color: "#4a5fa8", textAlign: "center" }}>Click any case marker to set the first measurement point</div>}
-      {rulerMode && rulerA && !rulerB && <div style={{ marginTop: 8, fontSize: 12, color: "#4a5fa8", textAlign: "center" }}><strong>{rulerA.label}</strong> selected — click a second case marker</div>}
+      {rulerMode && rulerA && !rulerB && <div style={{ marginTop: 8, fontSize: 12, color: "#4a5fa8", textAlign: "center" }}><strong>{toLines(rulerA.label).join(" ")}</strong> selected — click a second case marker</div>}
+      {!rulerMode && config.cases.length > 0 && (
+        <div data-no-export style={{ marginTop: 10, fontSize: 11, color: "#999", textAlign: "center", display: "flex", gap: 10, justifyContent: "center", alignItems: "center", flexWrap: "wrap" }}>
+          <span>Drag a case label down to move it clear of its neighbours · double-click a label to put it back</span>
+          {anyLabelMoved && (
+            <button onClick={() => onConfigChange && onConfigChange({ ...config, cases: config.cases.map(c => ({ ...c, labelOffset: null })) })}
+                    style={{ border: "1px solid #ddd", background: "#fff", borderRadius: 5, color: "#666", cursor: "pointer", fontSize: 11, padding: "3px 9px", fontFamily: "inherit" }}>
+              Reset label positions
+            </button>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -518,6 +619,11 @@ function DataForm({ config, onSave, onClose }) {
       setJsonText(JSON.stringify(next, null, 2));
     }
   };
+  const onResetLabelPositions = () => {
+    const next = { ...draft, cases: draft.cases.map(c => ({ ...c, labelOffset: null })) };
+    setDraft(next);
+    setJsonText(JSON.stringify(next, null, 2));
+  };
   const onClearAll = () => {
     if (window.confirm("Clear all cases? Categories and headings stay.")) {
       const next = { ...draft, cases: [] };
@@ -535,7 +641,12 @@ function DataForm({ config, onSave, onClose }) {
       ids.add(c.id);
       if (!Number.isFinite(Number(c.value))) { setError("Case " + (c.label || c.id) + " has a non-numeric value."); return; }
     }
-    const normalized = { ...draft, cases: draft.cases.map(c => ({ ...c, value: Number(c.value) })) };
+    const normalized = { ...draft, cases: draft.cases.map(c => ({
+      ...c,
+      value: Number(c.value),
+      labelOffset: Number.isFinite(+c.labelOffset) && c.labelOffset !== null && c.labelOffset !== ""
+        ? clamp(Math.round(+c.labelOffset), LABEL_MIN_OFFSET, 300) : null,
+    })) };
     onSave(normalized);
   };
 
@@ -567,23 +678,36 @@ function DataForm({ config, onSave, onClose }) {
         <div style={{ padding: "20px", overflowY: "auto", flex: 1 }}>
           {tab === "cases" && (
             <div>
-              <div style={{ display: "grid", gridTemplateColumns: "90px 1.2fr 120px 120px 1.5fr 28px", gap: 8, marginBottom: 8, fontSize: 11, color: "#777", textTransform: "uppercase", letterSpacing: "0.06em" }}>
-                <div>ID</div><div>Label</div><div>Value</div><div>Category</div><div>Tooltip / description</div><div></div>
+              <div style={{ display: "grid", gridTemplateColumns: "80px 1.2fr 110px 110px 74px 1.4fr 28px", gap: 8, marginBottom: 8, fontSize: 11, color: "#777", textTransform: "uppercase", letterSpacing: "0.06em" }}>
+                <div>ID</div><div>Label</div><div>Value</div><div>Category</div><div title="Pixels below the axis. Blank = automatic.">Label ↓</div><div>Tooltip / description</div><div></div>
               </div>
               {draft.cases.map((c, i) => (
-                <div key={i} style={{ display: "grid", gridTemplateColumns: "90px 1.2fr 120px 120px 1.5fr 28px", gap: 8, marginBottom: 6, alignItems: "start" }}>
+                <div key={i} style={{ display: "grid", gridTemplateColumns: "80px 1.2fr 110px 110px 74px 1.4fr 28px", gap: 8, marginBottom: 6, alignItems: "start" }}>
                   <input style={input} value={c.id} onChange={e => updateCase(i, { id: e.target.value })} />
-                  <input style={input} value={c.label} onChange={e => updateCase(i, { label: e.target.value })} />
+                  {/* A newline cannot survive a single-line input, so show it as the two
+                      characters \ and n. Both forms render as a line break in the chart. */}
+                  <input style={input} value={String(c.label == null ? "" : c.label).replace(/\n/g, "\\n")}
+                         onChange={e => updateCase(i, { label: e.target.value })} placeholder="Use \n for a line break" />
                   <input style={input} type="number" step="any" value={c.value} onChange={e => updateCase(i, { value: e.target.value })} />
                   <select style={input} value={c.category} onChange={e => updateCase(i, { category: e.target.value })}>
                     <option value="">(none)</option>
                     {draft.categories.map(cat => <option key={cat.id} value={cat.id}>{cat.label}</option>)}
                   </select>
-                  <textarea style={{ ...input, resize: "vertical", minHeight: 28 }} rows={1} value={c.tooltip || ""} onChange={e => updateCase(i, { tooltip: e.target.value })} placeholder="Multi-line description (Enter for new line)" />
+                  <input style={input} type="number" step="1" min={LABEL_MIN_OFFSET} max={300} placeholder="auto"
+                         value={Number.isFinite(c.labelOffset) ? c.labelOffset : ""}
+                         onChange={e => updateCase(i, { labelOffset: e.target.value === "" ? null : Number(e.target.value) })} />
+                  <textarea style={{ ...input, resize: "vertical", minHeight: 28 }} rows={1} value={c.tooltip || ""} onChange={e => updateCase(i, { tooltip: e.target.value })} placeholder="Multi-line description (Enter or \n for new line)" />
                   <button onClick={() => removeCase(i)} style={{ border: "1px solid #eee", background: "#fff", borderRadius: 4, color: "#c33", cursor: "pointer", padding: "4px 0", fontSize: 14 }}>×</button>
                 </div>
               ))}
-              <button onClick={addCase} style={{ marginTop: 10, padding: "6px 12px", border: "1px dashed #aaa", background: "transparent", borderRadius: 6, color: "#555", cursor: "pointer", fontSize: 12 }}>+ Add case</button>
+              <div style={{ display: "flex", gap: 10, alignItems: "center", marginTop: 10, flexWrap: "wrap" }}>
+                <button onClick={addCase} style={{ padding: "6px 12px", border: "1px dashed #aaa", background: "transparent", borderRadius: 6, color: "#555", cursor: "pointer", fontSize: 12 }}>+ Add case</button>
+                <button onClick={onResetLabelPositions} style={{ padding: "6px 12px", border: "1px solid #ddd", background: "#fff", borderRadius: 6, color: "#555", cursor: "pointer", fontSize: 12 }}>Reset label positions</button>
+              </div>
+              <div style={{ fontSize: 11, color: "#888", marginTop: 10, lineHeight: 1.6 }}>
+                <strong>Label ↓</strong> is the distance in pixels from the axis down to the label, {LABEL_MIN_OFFSET}–300. Leave it blank for automatic placement, or drag the label in the chart to set it.
+                Write <code>{"\\n"}</code> in a label or tooltip to break the line.
+              </div>
             </div>
           )}
 
@@ -678,7 +802,11 @@ function DataForm({ config, onSave, onClose }) {
                 }}
               />
               <div style={{ fontSize: 11, color: "#888", marginTop: 8, lineHeight: 1.6 }}>
-                Schema: <code>{"{ title, subtitle, currency: { symbol, locale, decimals, shortDivisor, shortSuffix, shortDecimals }, categories: [{ id, label, color, lineStyle }], cases: [{ id, label, value, category, tooltip }] }"}</code>
+                Schema: <code>{"{ title, subtitle, currency: { symbol, locale, decimals, shortDivisor, shortSuffix, shortDecimals }, categories: [{ id, label, color, lineStyle }], cases: [{ id, label, value, category, tooltip, labelOffset }] }"}</code>
+                <div style={{ marginTop: 6 }}>
+                  <code>labelOffset</code> is the label distance below the axis in pixels ({LABEL_MIN_OFFSET}–300); use <code>null</code> for automatic.
+                  In <code>label</code> and <code>tooltip</code>, <code>{"\\n"}</code> starts a new line.
+                </div>
               </div>
             </div>
           )}
@@ -711,7 +839,7 @@ function App() {
 
   return (
     <>
-      <Priceline config={config} onOpenForm={() => setShowForm(true)} />
+      <Priceline config={config} onOpenForm={() => setShowForm(true)} onConfigChange={setConfig} />
       {showForm && <DataForm config={config} onClose={() => setShowForm(false)} onSave={(c) => { setConfig(c); setShowForm(false); }} />}
     </>
   );
